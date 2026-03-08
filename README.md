@@ -26,13 +26,13 @@ pip install -r requirements.txt
 
 ### 1. Generate Placeholder Template
 ```bash
-python placeholder_generator.py
+python batch_pdf_folder_to_fillable_gui.py
 ```
 Creates a JSON file with field placeholders ready to be filled with your data.
 
 ### 2. GUI Field Mapper
 ```bash
-python gui_field_mapper.py
+python pdf_smart_filler_gui.py
 ```
 Opens an interactive GUI where you can:
 - Select a PDF file
@@ -40,20 +40,20 @@ Opens an interactive GUI where you can:
 - Define values for each field
 - Save the configuration as JSON
 
-### 3. Batch Fill PDFs (CLI)
+### 3. GUI PDF Filler
 ```bash
-python pdf_filler.py --pdf input.pdf --json config.json --output output.pdf
-```
-Fills a PDF file based on a JSON configuration file from the command line.
-
-### 4. GUI PDF Filler
-```bash
-python gui_pdf_filler.py
+python batch_pdf_folder_to_fillable_gui.py
 ```
 Launches a graphical interface to:
 - Select PDF and JSON files
 - Preview field mappings
 - Fill and save the output PDF
+
+### 4. CLI PDF Filler
+```bash
+python fill_pdf_from_json.py --pdf input.pdf --json config.json --output output.pdf
+```
+Fills a PDF file based on a JSON configuration file from the command line.
 
 ## Requirements
 
@@ -63,14 +63,14 @@ Launches a graphical interface to:
 ## Example Workflow
 
 ```
-1. Run placeholder_generator.py → Get template.json
+1. Run batch_pdf_folder_to_fillable_gui.py → Get template.json
 2. Edit template.json with your field data
-3. Run gui_pdf_filler.py → Select PDF & JSON → Fill & Save
+3. Run batch_pdf_folder_to_fillable_gui.py → Select PDF & JSON → Fill & Save
 ```
 
 Or use CLI:
 ```
-python pdf_filler.py --pdf form.pdf --json data.json --output filled_form.pdf
+python fill_pdf_from_json.py --pdf form.pdf --json data.json --output filled_form.pdf
 ```
 
 ## Contributing
