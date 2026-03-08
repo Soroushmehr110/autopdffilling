@@ -13,14 +13,7 @@ Automated PDF form filling tool with GUI support. Generate placeholders, define 
 
 ## Installation
 
-```bash
-# Clone the repository
-git clone https://github.com/Soroushmehr110/autopdffilling.git
-cd autopdffilling
 
-# Install dependencies
-pip install -r requirements.txt
-```
 
 ## Usage
 
@@ -51,7 +44,8 @@ Launches a graphical interface to:
 
 ### 4. CLI PDF Filler
 ```bash
-python fill_pdf_from_json.py --pdf input.pdf --json config.json --output output.pdf
+python fill_pdf_from_json.py --pdf "input.pdf" --json "input.json" --out "out.pdf"
+
 ```
 Fills a PDF file based on a JSON configuration file from the command line.
 
