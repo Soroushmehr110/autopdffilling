@@ -5,6 +5,12 @@ batch_pdf_folder_to_fillable_gui.py
 GUI tool to process all PDFs in a folder (including subfolders):
 - If a PDF is static (no form fields), auto-detect fields and create a fillable PDF in the same folder.
 - For every PDF, create a JSON file with placeholder names for text, checkbox, and radio fields.
+
+Local update note:
+- Uses nearest visible text when exported widget labels are missing.
+- Uses the updated local static_pdf_to_fillable.py detector from this folder.
+- For already fillable PDFs, placeholder labels are compared with the
+  nearest visible text and replaced when the embedded label is not relevant.
 """
 
 from __future__ import annotations
@@ -24,6 +30,122 @@ except ImportError as exc:
     raise SystemExit("Missing dependency: PyMuPDF. Install with: pip install pymupdf") from exc
 
 from static_pdf_to_fillable import FieldSpec, auto_detect_fields, convert_pdf
+
+
+def _normalize_gui_label(text: str) -> str:
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    text = re.sub(r"[_\.]{2,}", " ", text)
+    text = re.sub(r"[\[\]\(\)]", " ", text)
+    return text.strip(" -:\t,.;")
+
+
+def _candidate_gui_label(text: str) -> str:
+    cleaned = _normalize_gui_label(text)
+    if not cleaned:
+        return ""
+    m = re.findall(r"([A-Za-z][A-Za-z0-9 /&().,'-]{1,80})\s*:", cleaned)
+    if m:
+        return _normalize_gui_label(m[-1])
+    return cleaned
+
+
+def _normalize_compare_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def _looks_like_auto_label(label: str, field_name: str) -> bool:
+    norm_label = _normalize_compare_text(label)
+    norm_name = _normalize_compare_text(field_name)
+    if not norm_label:
+        return True
+    if norm_label == norm_name and norm_name:
+        return True
+    if norm_label.startswith(("txt", "chk", "fld", "field", "unnamed")):
+        return True
+    return False
+
+
+def _labels_are_relevant(current_label: str, nearest_label: str) -> bool:
+    a = _normalize_compare_text(current_label)
+    b = _normalize_compare_text(nearest_label)
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+
+    a_tokens = {tok for tok in a.split() if tok}
+    b_tokens = {tok for tok in b.split() if tok}
+    if not a_tokens or not b_tokens:
+        return False
+
+    overlap = len(a_tokens & b_tokens)
+    shortest = min(len(a_tokens), len(b_tokens))
+    return overlap >= max(1, shortest - 1)
+
+
+def _choose_placeholder_label(field_name: str, current_label: str, nearest_label: str) -> str:
+    current = _candidate_gui_label(current_label)
+    nearest = _candidate_gui_label(nearest_label)
+    if not nearest:
+        return current
+    if not current:
+        return nearest
+    if _looks_like_auto_label(current, field_name):
+        return nearest
+    if _labels_are_relevant(current, nearest):
+        return current
+    return nearest
+
+
+def _rect_center(rect: "fitz.Rect") -> tuple[float, float]:
+    return ((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
+
+
+def _nearest_text_label(page, target_rect: "fitz.Rect") -> str:
+    text_dict = page.get_text("dict")
+    best = ""
+    best_score = float("inf")
+    tx, ty = _rect_center(target_rect)
+
+    for block in text_dict.get("blocks", []):
+        if block.get("type", 0) != 0:
+            continue
+        for line in block.get("lines", []):
+            spans = line.get("spans", [])
+            line_text = "".join(span.get("text", "") for span in spans).strip()
+            label = _candidate_gui_label(line_text)
+            if len(label) < 2:
+                continue
+
+            if spans:
+                x0 = min(float(span["bbox"][0]) for span in spans)
+                y0 = min(float(span["bbox"][1]) for span in spans)
+                x1 = max(float(span["bbox"][2]) for span in spans)
+                y1 = max(float(span["bbox"][3]) for span in spans)
+            else:
+                b = line.get("bbox", [0, 0, 0, 0])
+                x0, y0, x1, y1 = map(float, b)
+
+            rect = fitz.Rect(x0, y0, x1, y1)
+            lx, ly = _rect_center(rect)
+            if rect.x1 < target_rect.x0:
+                dx = target_rect.x0 - rect.x1
+            elif rect.x0 > target_rect.x1:
+                dx = rect.x0 - target_rect.x1
+            else:
+                dx = abs(tx - lx) * 0.15
+            dy = abs(ty - ly)
+            score = dx * 1.25 + dy * 2.6
+            if rect.intersects(target_rect):
+                score -= 18.0
+            elif abs(rect.y0 - target_rect.y0) < max(6.0, target_rect.height):
+                score -= 6.0
+
+            if score < best_score:
+                best_score = score
+                best = label
+
+    return best
 
 
 def widget_type_name(widget_type: int) -> str:
@@ -142,6 +264,16 @@ def _radio_group_name(doc, w) -> str:
     return (getattr(w, "field_name", "") or "").strip()
 
 
+def _widget_current_value(w) -> str:
+    raw = getattr(w, "field_value", None)
+    if raw is None:
+        return ""
+    value = str(raw).strip()
+    if not value or value.lower() == "off":
+        return ""
+    return value
+
+
 def extract_existing_widget_placeholders(pdf_path: str) -> List[Dict]:
     items: List[Dict] = []
     doc = fitz.open(pdf_path)
@@ -153,6 +285,14 @@ def extract_existing_widget_placeholders(pdf_path: str) -> List[Dict]:
             for w in list(page.widgets() or []):
                 name = (w.field_name or "").strip() or f"unnamed_p{pidx+1}_{len(items)+1}"
                 ftype = widget_type_name(getattr(w, "field_type", -1))
+                rect = getattr(w, "rect", None)
+                nearest_label = _nearest_text_label(page, rect) if rect else ""
+                chosen_label = _choose_placeholder_label(
+                    name,
+                    getattr(w, "field_label", "") or "",
+                    nearest_label,
+                )
+                current_value = _widget_current_value(w)
                 if ftype == "radio":
                     gname = _radio_group_name(doc, w).strip() or name
                     grp = radio_groups.setdefault(
@@ -161,11 +301,16 @@ def extract_existing_widget_placeholders(pdf_path: str) -> List[Dict]:
                             "name": gname,
                             "type": "radio",
                             "page": pidx + 1,
-                            "label": "",
+                            "label": chosen_label,
+                            "value": current_value,
                             "values": [],
                             "_seen": set(),
                         },
                     )
+                    if chosen_label:
+                        grp["label"] = _choose_placeholder_label(gname, grp["label"], chosen_label)
+                    if current_value:
+                        grp["value"] = current_value
                     for v in _widget_states(w):
                         vk = v.lower()
                         if vk in grp["_seen"]:
@@ -182,7 +327,8 @@ def extract_existing_widget_placeholders(pdf_path: str) -> List[Dict]:
                         "name": name,
                         "type": ftype,
                         "page": pidx + 1,
-                        "label": getattr(w, "field_label", "") or "",
+                        "label": chosen_label or "",
+                        "value": current_value,
                     }
                 )
         for grp in radio_groups.values():
@@ -196,7 +342,8 @@ def extract_existing_widget_placeholders(pdf_path: str) -> List[Dict]:
                             "type": "radio",
                             "page": grp["page"],
                             "label": grp["label"],
-                            "value": v,
+                            "value": grp.get("value", ""),
+                            "export_value": v,
                         }
                     )
             else:
@@ -206,6 +353,7 @@ def extract_existing_widget_placeholders(pdf_path: str) -> List[Dict]:
                         "type": "radio",
                         "page": grp["page"],
                         "label": grp["label"],
+                        "value": grp.get("value", ""),
                     }
                 )
     finally:
@@ -224,7 +372,8 @@ def fieldspecs_to_placeholder_list(fields: List[FieldSpec]) -> List[Dict]:
                         "type": "radio",
                         "page": opt.get("page") or spec.page,
                         "label": opt.get("label") or spec.label or "",
-                        "value": opt.get("value"),
+                        "value": "",
+                        "export_value": opt.get("value"),
                     }
                 )
         else:
@@ -234,6 +383,7 @@ def fieldspecs_to_placeholder_list(fields: List[FieldSpec]) -> List[Dict]:
                     "type": spec.field_type,
                     "page": spec.page,
                     "label": spec.label or "",
+                    "value": "",
                 }
             )
     return out
